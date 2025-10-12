@@ -8,18 +8,9 @@ if [ -r "/etc/alpsnap.conf" ]; then
 elif [ -r "./etc/alpsnap.conf" ]; then
   . ./etc/alpsnap.conf
 else
-  echo "No config found, Manually copy etc/alpsnap.conf to /etc"
+  echo "No config found, copy etc/alpsnap.conf to /etc"
   exit 1
 fi
-
-check_deps() {
-  for dep in rsync; do
-    command -v "$dep" >/dev/null 2>&1 || {
-      echo "Missing dependency: $dep. Install with: apk add $dep"
-      exit 1
-    }
-  done
-}
 
 log() {
   local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
@@ -30,101 +21,131 @@ die() { log "ERROR: $*"; exit 1; }
 
 require_root() { [ "$(id -u)" -eq 0 ] || die "Run as root"; }
 
-cmd_exists() { command -v "$1" >/dev/null 2>&1; }
-
 snapshot_id() { date +"$TIME_FMT"; }
-
-detect_backend() {
-  if [ "$SNAP_BACKEND" = "auto" ]; then
-    if cmd_exists btrfs && awk '$2=="/"{print $3}' /proc/mounts | grep -q '^btrfs$'; then
-      echo "btrfs"; return
-    fi
-    if cmd_exists lvdisplay; then
-      echo "lvm"; return
-    fi
-    echo "rsync"; return
-  fi
-  echo "$SNAP_BACKEND"
-}
 
 ensure_dirs() { mkdir -p "$SNAP_ROOT"; }
 
-rsync_snapshot() {
-  local sid="$1" prev="$2"
-  local dest="$SNAP_ROOT/$sid"
-  mkdir -p "$dest"
+check_deps() {
+  command -v rsync >/dev/null 2>&1 || die "Missing dependency: rsync"
+  command -v tar   >/dev/null 2>&1 || die "Missing dependency: tar"
 
-  for p in $INCLUDE_PATHS; do
-    local rel; rel="$(echo "$p" | sed 's#^/##')"
-    [ -z "$rel" ] && rel="root"
+  if [ "$COMPRESS_MODE" = "zstd" ]; then
+    command -v zstd >/dev/null 2>&1 || die "Missing dependency: zstd (apt install zstd)"
+  fi
 
-    local tgt="$dest/$rel"
-    mkdir -p "$tgt"
-
-    local linkopt=""
-    if [ -n "$prev" ] && [ -d "$SNAP_ROOT/$prev/$rel" ]; then
-      linkopt="--link-dest=$SNAP_ROOT/$prev/$rel"
-    fi
-
-    log "rsync snapshot of $p -> $tgt${linkopt:+ (link-dest=$SNAP_ROOT/$prev/$rel)}"
-
-    rsync -aHAX --delete --numeric-ids $linkopt \
-      $(for e in $EXCLUDE_PATHS; do echo "--exclude=$e"; done) \
-      "$p/" "$tgt/" || die "rsync failed for $p"
-  done
-
-  log "rsync snapshot completed: $sid"
+  if [ "$ENCRYPT_MODE" = "gpg" ]; then
+    command -v gpg >/dev/null 2>&1 || die "Missing dependency: gpg (apt install gnupg)"
+  fi
 }
 
+# tmpdir and cleanup
+tmpdir=""
+cleanup() {
+  if [ -n "${tmpdir:-}" ] && [ -d "$tmpdir" ]; then
+    rm -rf "$tmpdir"
+  fi
+}
+trap cleanup EXIT
+
+# ---------------- Snapshot creation ----------------
 create_snapshot() {
   require_root
   check_deps
   ensure_dirs
 
-  local backend; backend="$(detect_backend)"
   local sid; sid="$(snapshot_id)"
+  tmpdir="$(mktemp -d)"
 
-  local prev; prev="$(ls -1 "$SNAP_ROOT" 2>/dev/null | sort | tail -n1 || true)"
-
-  log "Snapshot begin id=$sid backend=$backend prev=${prev:-none}"
-
-  case "$backend" in
-    rsync) rsync_snapshot "$sid" "$prev" ;;
-    btrfs) rsync_snapshot "$sid" "$prev" ;;
-    lvm)   rsync_snapshot "$sid" "$prev" ;;
-    *)     die "Unsupported backend filesystem: $backend" ;;
-  esac
-
-  log "Snapshot done id=$sid"
-}
-
-restore_snapshot() {
-  require_root
-  local sid="$1"
-  local src="$SNAP_ROOT/$sid"
-  [ -d "$src" ] || die "Snapshot not found: $sid"
+  log "Snapshot begin id=$sid"
 
   for p in $INCLUDE_PATHS; do
     local rel; rel="$(echo "$p" | sed 's#^/##')"
     [ -z "$rel" ] && rel="root"
-    local s="$src/$rel"
+    local tgt="$tmpdir/$rel"
+    mkdir -p "$tgt"
+    log "rsync snapshot of $p -> $tgt"
+    rsync -aHAX --delete --numeric-ids \
+      $(for e in $EXCLUDE_PATHS; do echo "--exclude=$e"; done) \
+      "$p/" "$tgt/" || die "rsync failed for $p"
+  done
+
+  # compress
+  local archive="$SNAP_ROOT/$sid.tar"
+  case "$COMPRESS_MODE" in
+    zstd) archive="$SNAP_ROOT/$sid.tar.zst"; tar -I zstd -cf "$archive" -C "$tmpdir" . ;;
+    tar)  archive="$SNAP_ROOT/$sid.tar.gz";  tar -czf "$archive" -C "$tmpdir" . ;;
+    none) archive="$SNAP_ROOT/$sid.tar";     tar -cf "$archive" -C "$tmpdir" . ;;
+  esac
+
+  # encrypt
+  if [ "$ENCRYPT_MODE" = "gpg" ]; then
+    if [ -n "$GPG_RECIPIENT" ]; then
+      gpg --output "$archive.gpg" --encrypt --recipient "$GPG_RECIPIENT" "$archive"
+    else
+      gpg --symmetric --output "$archive.gpg" "$archive"
+    fi
+    rm -f "$archive"
+    archive="$archive.gpg"
+  fi
+
+  log "Snapshot archived: $archive"
+}
+
+# ---------------- Restore ----------------
+restore_snapshot() {
+  require_root
+  local sid="$1"
+  local archive
+
+  archive="$(ls "$SNAP_ROOT/$sid".tar* 2>/dev/null | head -n1 || true)"
+  [ -n "$archive" ] || die "Snapshot archive not found: $sid"
+
+  tmpdir="$(mktemp -d)"
+
+  # decrypt
+  if echo "$archive" | grep -q '\.gpg$'; then
+    log "Decrypting $archive"
+    gpg --no-symkey-cache --output "$tmpdir/snapshot.tar" --decrypt "$archive" || die "Decrypt failed"
+    archive="$tmpdir/snapshot.tar"
+  fi
+
+  # extract
+  log "Extracting $archive"
+  case "$archive" in
+    *.tar.zst) tar -I zstd -xf "$archive" -C "$tmpdir" ;;
+    *.tar.gz)  tar -xzf "$archive" -C "$tmpdir" ;;
+    *.tar)     tar -xf "$archive" -C "$tmpdir" ;;
+    *) die "Unknown archive format: $archive" ;;
+  esac
+
+  # rsync
+  for p in $INCLUDE_PATHS; do
+    local rel; rel="$(echo "$p" | sed 's#^/##')"
+    [ -z "$rel" ] && rel="root"
+    local s="$tmpdir/$rel"
     [ -d "$s" ] || { log "WARN: path missing in snapshot: $rel"; continue; }
     log "Restoring $p from $sid"
-    rsync -aHAX --delete --numeric-ids "$s/" "$p/" || die "Restore failed for $p"
+    rsync -aHAX --delete --numeric-ids "$s/" "$p" || die "Restore failed for $p"
   done
+
   log "Restore complete for $sid"
 }
 
-
-
-list_snapshots() { ls -1 "$SNAP_ROOT" 2>/dev/null | sort || true; }
+# ---------------- List ----------------
+list_snapshots() {
+  ls -1 "$SNAP_ROOT" 2>/dev/null \
+    | grep -E '\.tar(\.gz|\.zst)?(\.gpg)?$' \
+    | sed -E 's/\.tar(\.gz|\.zst)?(\.gpg)?$//' \
+    | sort -u || true
+  return 0
+}
 
 usage() {
   cat <<EOF
 Usage: ./alpsnap.sh <command> [args]
 
 Commands:
-  snapshot             Create a snapshot
+  snapshot             Create a snapshot (archive)
   restore <id>         Restore snapshot <id>
   list                 List snapshots
   help                 Show this help
@@ -135,9 +156,13 @@ main() {
   local cmd="${1:-help}"
   case "$cmd" in
     snapshot) create_snapshot ;;
-    restore)  [ $# -ge 2 ] || die "restore requires snapshot id"; restore_snapshot "$2" ;;
-    list)     list_snapshots ;;
-    help|*)   usage ;;
+    restore)
+      shift
+      [ $# -ge 1 ] || die "restore requires snapshot id"
+      restore_snapshot "$1"
+      ;;
+    list) list_snapshots ;;
+    help|*) usage ;;
   esac
 }
 
