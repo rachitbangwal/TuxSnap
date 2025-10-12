@@ -8,9 +8,18 @@ if [ -r "/etc/alpsnap.conf" ]; then
 elif [ -r "./etc/alpsnap.conf" ]; then
   . ./etc/alpsnap.conf
 else
-  echo "No config found. Please copy etc/alpsnap.conf to /etc"
+  echo "No config found, Manually copy etc/alpsnap.conf to /etc"
   exit 1
 fi
+
+check_deps() {
+  for dep in rsync; do
+    command -v "$dep" >/dev/null 2>&1 || {
+      echo "Missing dependency: $dep. Install with: apk add $dep"
+      exit 1
+    }
+  done
+}
 
 log() {
   local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
@@ -40,41 +49,52 @@ detect_backend() {
 
 ensure_dirs() { mkdir -p "$SNAP_ROOT"; }
 
-# --- Snapshot implementations ---
-
 rsync_snapshot() {
-  local sid="$1" dest="$SNAP_ROOT/$sid"
+  local sid="$1" prev="$2"
+  local dest="$SNAP_ROOT/$sid"
   mkdir -p "$dest"
-  local latest; latest="$(ls -1 "$SNAP_ROOT" 2>/dev/null | sort | tail -n1 || true)"
+
   for p in $INCLUDE_PATHS; do
     local rel; rel="$(echo "$p" | sed 's#^/##')"
     [ -z "$rel" ] && rel="root"
+
     local tgt="$dest/$rel"
     mkdir -p "$tgt"
+
     local linkopt=""
-    if [ -n "$latest" ] && [ -d "$SNAP_ROOT/$latest/$rel" ]; then
-      linkopt="--link-dest=$SNAP_ROOT/$latest/$rel"
+    if [ -n "$prev" ] && [ -d "$SNAP_ROOT/$prev/$rel" ]; then
+      linkopt="--link-dest=$SNAP_ROOT/$prev/$rel"
     fi
-    log "rsync snapshot of $p -> $tgt"
+
+    log "rsync snapshot of $p -> $tgt${linkopt:+ (link-dest=$SNAP_ROOT/$prev/$rel)}"
+
     rsync -aHAX --delete --numeric-ids $linkopt \
       $(for e in $EXCLUDE_PATHS; do echo "--exclude=$e"; done) \
       "$p/" "$tgt/" || die "rsync failed for $p"
   done
+
   log "rsync snapshot completed: $sid"
 }
 
 create_snapshot() {
   require_root
+  check_deps
   ensure_dirs
+
   local backend; backend="$(detect_backend)"
   local sid; sid="$(snapshot_id)"
-  log "Snapshot begin id=$sid backend=$backend"
+
+  local prev; prev="$(ls -1 "$SNAP_ROOT" 2>/dev/null | sort | tail -n1 || true)"
+
+  log "Snapshot begin id=$sid backend=$backend prev=${prev:-none}"
+
   case "$backend" in
-    rsync) rsync_snapshot "$sid" ;;
-    btrfs) rsync_snapshot "$sid" ;;
-    lvm)   rsync_snapshot "$sid" ;;
-    *)     die "Unsupported backend: $backend" ;;
+    rsync) rsync_snapshot "$sid" "$prev" ;;
+    btrfs) rsync_snapshot "$sid" "$prev" ;;
+    lvm)   rsync_snapshot "$sid" "$prev" ;;
+    *)     die "Unsupported backend filesystem: $backend" ;;
   esac
+
   log "Snapshot done id=$sid"
 }
 
@@ -83,6 +103,7 @@ restore_snapshot() {
   local sid="$1"
   local src="$SNAP_ROOT/$sid"
   [ -d "$src" ] || die "Snapshot not found: $sid"
+
   for p in $INCLUDE_PATHS; do
     local rel; rel="$(echo "$p" | sed 's#^/##')"
     [ -z "$rel" ] && rel="root"
@@ -93,6 +114,8 @@ restore_snapshot() {
   done
   log "Restore complete for $sid"
 }
+
+
 
 list_snapshots() { ls -1 "$SNAP_ROOT" 2>/dev/null | sort || true; }
 
