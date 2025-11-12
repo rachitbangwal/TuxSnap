@@ -3,6 +3,9 @@
 
 #include <QDialog>
 #include <QLineEdit>
+#include <QRadioButton>
+#include <QButtonGroup>
+#include <QPushButton>
 
 class SettingsDialog : public QDialog
 {
@@ -14,12 +17,25 @@ public:
 private slots:
     void loadConfig();
     void saveConfig();
+    void onFieldChanged();
 
 private:
     QLineEdit *snapRootEdit;
     QLineEdit *includePathsEdit;
-    QLineEdit *compressModeEdit;
+    QLineEdit *excludePathsEdit;
+    
+    QRadioButton *encryptGpgRadio;
+    QRadioButton *encryptNoneRadio;
+    QButtonGroup *encryptGroup;
+    
+    QLineEdit *gpgRecipientEdit;
+    
+    QPushButton *applyButton;
+    QPushButton *cancelButton;
+
     const QString configPath = "/etc/alpsnap.conf";
+
+    QString parseValue(const QString &line) const;
 };
 
 #endif
