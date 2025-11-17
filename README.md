@@ -107,6 +107,56 @@ Adjust `INCLUDE_PATHS` and `EXCLUDE_PATHS` as needed.
 
 ------------------------------------------------------------------------
 
+### **3. GPG Encryption Setup**
+
+Setting up GPG encryption for TuxSnap involves creating a personal key pair and configuring the application to use it.
+
+#### **Step 1: Generate Your Personal GPG Key**
+
+**Install GPG (if not already installed):**
+
+```bash
+sudo apt update
+sudo apt install gnupg
+```
+
+**Generate your key pair:**
+
+```bash
+gpg --full-generate-key
+```
+
+Follow the prompts:
+- **Key type:** Choose `1` (RSA and RSA)
+- **Key size:** Enter `4096` 
+- **Expiration:** Press Enter (no expiration)
+- **Real name:** Enter your name (e.g., "TuxSnap Admin")
+- **Email:** Enter your email (e.g., "admin@wsl.local")
+- **Comment:** Leave blank or add optional description
+- **Confirm:** Type `O` (Okay) and press Enter
+
+**Create a passphrase when prompted.** This secures your private key and will be required for decryption.
+
+#### **Step 2: Configure TuxSnap to Use Your Key**
+
+**Find your GPG recipient ID:**
+
+```bash
+gpg --list-keys
+```
+
+Look for your email address in the output (e.g., `admin@wsl.local`). This will be your GPG recipient.
+
+**Configure the application:**
+
+1. Run TuxSnap: `sudo ./alpsnap`
+2. Click "Settings" 
+3. Set `ENCRYPT_MODE` to `gpg`
+4. Set `GPG_RECIPIENT` to your email address
+5. Click "Apply"
+
+------------------------------------------------------------------------
+
 ## Running the Application
 
 ### **Launch TuxSnap**
