@@ -17,7 +17,12 @@ log() {
   echo "$ts [alpsnap] $*" | tee -a "$LOG_FILE"
 }
 
-die() { log "ERROR: $*"; exit 1; }
+die() {
+  local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
+  local msg="$ts [alpsnap] ERROR: $*"
+  echo "$msg" | tee -a "$LOG_FILE" >&2
+  exit 1
+}
 
 require_root() { [ "$(id -u)" -eq 0 ] || die "Run as root"; }
 
@@ -131,6 +136,21 @@ restore_snapshot() {
   log "Restore complete for $sid"
 }
 
+# ---------------- Remove ----------------
+remove_snapshot() {
+  require_root
+  local sid="$1"
+  local archive
+
+  archive="$(ls "$SNAP_ROOT/$sid".tar* 2>/dev/null | head -n1 || true)"
+  [ -n "$archive" ] || die "Snapshot archive not found: $sid"
+
+  log "Removing snapshot: $archive"
+  rm -f "$archive" || die "Failed to remove $archive"
+  log "Snapshot removed: $sid"
+}
+
+
 # ---------------- List ----------------
 list_snapshots() {
   ls -1 "$SNAP_ROOT" 2>/dev/null \
@@ -147,6 +167,7 @@ Usage: ./alpsnap.sh <command> [args]
 Commands:
   snapshot             Create a snapshot (archive)
   restore <id>         Restore snapshot <id>
+  remove <id>          Remove snapshot <id>
   list                 List snapshots
   help                 Show this help
 EOF
@@ -160,6 +181,11 @@ main() {
       shift
       [ $# -ge 1 ] || die "restore requires snapshot id"
       restore_snapshot "$1"
+      ;;
+    remove)
+      shift
+      [ $# -ge 1 ] || die "remove requires snapshot id"
+      remove_snapshot "$1"
       ;;
     list) list_snapshots ;;
     help|*) usage ;;

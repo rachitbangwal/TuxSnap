@@ -36,14 +36,19 @@ AlpSnapGui::AlpSnapGui(QWidget *parent) : QMainWindow(parent)
     // 1. Buttons
     createButton = new QPushButton("Create Snapshot");
     restoreButton = new QPushButton("Restore Snapshot");
+    removeButton = new QPushButton("Remove Snapshot");
+    refreshButton = new QPushButton("Refresh List");
     settingsButton = new QPushButton("Settings");
 
     topBarLayout->addWidget(createButton);
     topBarLayout->addWidget(restoreButton);
+    topBarLayout->addWidget(removeButton);
+    topBarLayout->addWidget(refreshButton);
     topBarLayout->addStretch(1);
     topBarLayout->addWidget(settingsButton);
 
     restoreButton->setEnabled(false);
+    removeButton->setEnabled(false);
 
     // 2. Snapshot List
     snapshotList = new QListWidget;
@@ -60,6 +65,8 @@ AlpSnapGui::AlpSnapGui(QWidget *parent) : QMainWindow(parent)
     // Connects
     connect(createButton, &QPushButton::clicked, this, &AlpSnapGui::createSnapshot);
     connect(restoreButton, &QPushButton::clicked, this, &AlpSnapGui::restoreSnapshot);
+    connect(removeButton, &QPushButton::clicked, this, &AlpSnapGui::removeSnapshot);
+    connect(refreshButton, &QPushButton::clicked, this, &AlpSnapGui::loadSnapshots);
     connect(settingsButton, &QPushButton::clicked, this, &AlpSnapGui::showSettings);
     connect(snapshotList, &QListWidget::currentItemChanged, this, &AlpSnapGui::handleRestoreButtonState);
     
@@ -91,8 +98,12 @@ void AlpSnapGui::runScriptCommand(const QStringList &arguments, const QString &s
     QString absoluteScriptPath = getAbsoluteScriptPath(); 
 
     statusBar->showMessage(QString("Executing: %1 %2...").arg(absoluteScriptPath).arg(arguments.join(" ")));
+    
     createButton->setEnabled(false);
     restoreButton->setEnabled(false);
+    removeButton->setEnabled(false);
+    refreshButton->setEnabled(false);
+    settingsButton->setEnabled(false);
 
     QProcess *process = new QProcess(this);
     process->start("bash", QStringList() << absoluteScriptPath << arguments);
@@ -105,12 +116,25 @@ void AlpSnapGui::runScriptCommand(const QStringList &arguments, const QString &s
             QMessageBox::information(this, "Success", successMessage);
             loadSnapshots();
         } else {
-            QString errorOutput = QString::fromUtf8(process->readAllStandardError());
+            QString stdError = QString::fromUtf8(process->readAllStandardError()).trimmed();
+            QString stdOutput = QString::fromUtf8(process->readAllStandardOutput()).trimmed();
+            
+            QString errorDetails;
+            if (!stdError.isEmpty()) {
+                errorDetails = stdError;
+            } else if (!stdOutput.isEmpty()) {
+                errorDetails = stdOutput;
+            } else {
+                errorDetails = "No output captured. Check /var/log/alpsnap.log";
+            }
+            
             QMessageBox::critical(this, "Operation Failed", 
-                                  QString("Script failed with exit code %1.\nError: %2").arg(exitCode).arg(errorOutput.trimmed()));
+                                  QString("Script failed with exit code %1.\n\n%2").arg(exitCode).arg(errorDetails));
         }
 
         createButton->setEnabled(true);
+        refreshButton->setEnabled(true);
+        settingsButton->setEnabled(true);
         handleRestoreButtonState(snapshotList->currentItem());
         process->deleteLater();
     });
@@ -136,6 +160,11 @@ void AlpSnapGui::loadSnapshots()
     statusBar->showMessage("Loading snapshots...");
     snapshotList->clear();
     
+    createButton->setEnabled(false);
+    restoreButton->setEnabled(false);
+    removeButton->setEnabled(false);
+    refreshButton->setEnabled(false);
+    
     QString absoluteScriptPath = getAbsoluteScriptPath(); 
     
     QProcess *process = new QProcess(this);
@@ -143,13 +172,17 @@ void AlpSnapGui::loadSnapshots()
 
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), 
         [=, this](int exitCode, QProcess::ExitStatus exitStatus) {
+        
+        createButton->setEnabled(true);
+        refreshButton->setEnabled(true);
+        
         if (exitStatus == QProcess::NormalExit && exitCode == 0) {
             QString output = QString::fromUtf8(process->readAllStandardOutput()).trimmed();
             QStringList snapshots = output.split('\n', Qt::SkipEmptyParts);
             
             if (snapshots.isEmpty()) {
                  QListWidgetItem *item = new QListWidgetItem("No snapshots found.", snapshotList);
-                 item->setFlags(item->flags() & ~Qt::ItemIsSelectable); // Make it non-selectable
+                 item->setFlags(item->flags() & ~Qt::ItemIsSelectable);
                  statusBar->showMessage("No snapshots found.", 3000);
             } else {
                 snapshotList->addItems(snapshots);
@@ -158,10 +191,19 @@ void AlpSnapGui::loadSnapshots()
 
         } else {
             QString errorOutput = QString::fromUtf8(process->readAllStandardError()).trimmed();
+            if (errorOutput.isEmpty()) {
+                errorOutput = QString::fromUtf8(process->readAllStandardOutput()).trimmed();
+            }
+            if (errorOutput.isEmpty()) {
+                errorOutput = "No output captured. Check /var/log/alpsnap.log";
+            }
+            
             QMessageBox::critical(this, "List Error", 
-                                 QString("Failed to list snapshots. Check script logs.\nError: %1").arg(errorOutput));
+                                 QString("Failed to list snapshots.\n\n%1").arg(errorOutput));
             statusBar->showMessage("Failed to load snapshots.", 5000);
         }
+        
+        handleRestoreButtonState(snapshotList->currentItem());
         process->deleteLater();
     });
 }
@@ -188,6 +230,20 @@ void AlpSnapGui::restoreSnapshot()
     }
 }
 
+void AlpSnapGui::removeSnapshot()
+{
+    QListWidgetItem *selected = snapshotList->currentItem();
+    if (!selected) return;
+
+    QString sid = selected->text();
+
+    if (QMessageBox::question(this, "Confirm Deletion", 
+                             QString("Are you sure you want to permanently delete snapshot '%1'?").arg(sid), 
+                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes) {
+        runScriptCommand(QStringList() << "remove" << sid, QString("Snapshot %1 has been removed.").arg(sid));
+    }
+}
+
 void AlpSnapGui::showSettings()
 {
     SettingsDialog dialog(this);
@@ -196,5 +252,7 @@ void AlpSnapGui::showSettings()
 
 void AlpSnapGui::handleRestoreButtonState(QListWidgetItem *current)
 {
-    restoreButton->setEnabled(current != nullptr && (current->flags() & Qt::ItemIsSelectable));
+    bool isSelectable = (current != nullptr && (current->flags() & Qt::ItemIsSelectable));
+    restoreButton->setEnabled(isSelectable);
+    removeButton->setEnabled(isSelectable);
 }

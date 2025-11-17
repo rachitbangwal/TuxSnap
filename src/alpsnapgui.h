@@ -18,6 +18,7 @@ public:
 private slots:
     void createSnapshot();
     void restoreSnapshot();
+    void removeSnapshot();
     void showSettings();
     void loadSnapshots();
     void handleScriptOutput(int exitCode, QProcess::ExitStatus exitStatus);
@@ -27,6 +28,8 @@ private:
     QListWidget *snapshotList;
     QPushButton *createButton;
     QPushButton *restoreButton;
+    QPushButton *removeButton;
+    QPushButton *refreshButton;
     QPushButton *settingsButton;
     QStatusBar *statusBar;
 
