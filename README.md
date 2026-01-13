@@ -172,3 +172,8 @@ sudo ./alpsnap
 The GUI will open and allow snapshot operations.
 
 ------------------------------------------------------------------------
+
+## Authors
+[Rachit Bangwal (github profile)](https://github.com/rachitbangwal)    <br>
+[Pulkit Jakhmola (github profile)](https://github.com/Pulkitjakhmola)  <br>
+[Rahul Kandwal (github profile)](https://github.com/rahulkandwal19)
